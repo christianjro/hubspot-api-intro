@@ -4,8 +4,11 @@ const axios = require('axios');
 const querystring = require('querystring');
 const session = require('express-session');
 const { response } = require('express');
+const NodeCache = require('node-cache');
 
 const app = express();
+
+const accessTokenCache = new NodeCache();
 
 app.set('view engine', 'pug');
 app.use(express.static(__dirname + '/public'));
@@ -19,7 +22,8 @@ const CLIENT_SECRET = process.env.CLIENT_SECRET;
 const REDIRECT_URI = 'http://localhost:3000/oauth-callback';
 const authUrl = 'https://app.hubspot.com/oauth/authorize?client_id=029ddea4-54e6-40f4-92c9-dd1e0c1900e7&redirect_uri=http://localhost:3000/oauth-callback&scope=crm.lists.read%20crm.objects.contacts.read%20crm.objects.contacts.write%20crm.schemas.contacts.read%20crm.lists.write%20crm.schemas.contacts.write';
 
-const tokenStore = {};
+// In a real-world app, this object would be a database
+const refreshTokenStore = {};
 
 app.use(session({
     secret: Math.random().toString(36).substring(2),
@@ -34,12 +38,37 @@ app.use(session({
 // }
 
 const isAuthorized = (userId) => {
-    return tokenStore[userId] ? true : false;
+    return refreshTokenStore[userId] ? true : false;
 };
+
+const getToken = async (userId) => {
+    if (accessTokenCache.get(userId)) {
+        return accessTokenCache.get(userId);
+    } else {
+        try {
+            const refreshTokenProof = {
+                grant_type: 'refresh_token',
+                client_id: CLIENT_ID,
+                client_secret: CLIENT_SECRET,
+                redirect_uri: REDIRECT_URI,
+                refresh_token: refreshTokenStore[userId]
+            };
+            const responseBody = await axios.post('https://api.hubspot.com/oauth/v1/token', querystring.stringify(refreshTokenProof));
+            refreshTokenStore[userId] = responseBody.data.refresh_token;
+            accessTokenCache.set(userId, responseBody.data.access_token, Math.round(responseBody.data.expires_in * 0.75));
+            console.log('getting refresh token');
+            return responseBody.data.access_token;
+        } catch (error) {
+            console.error(error);
+        }
+    }
+}
 
 app.get('/', async (req, res) => {
     if (isAuthorized(req.sessionID)) {
-        const accessToken = tokenStore[req.sessionID];
+        // getToken function will check the cached access token and will return it
+        // or use the refresh token to fetch a new one
+        const accessToken = await getToken[req.sessionID];
         const headers = {
             Authorization : `Bearer ${accessToken}`,
             'Content-Type': 'application/json'
@@ -72,7 +101,8 @@ app.get('/oauth-callback', async (req, res) => {
     try {
         const responseBody = await axios.post('https://api.hubspot.com/oauth/v1/token', querystring.stringify(authCodeProof));
         // 4. Get access token and refresh token
-        tokenStore[req.sessionID] = responseBody.data.access_token;
+        refreshTokenStore[req.sessionID] = responseBody.data.access_token;
+        accessTokenCache.set(req.sessionID, responseBody.data.access_token, 5);
         res.redirect('/');
     } catch (error) {
         console.error(error)
